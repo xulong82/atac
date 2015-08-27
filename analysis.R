@@ -1,123 +1,130 @@
+library(ape)
+library(amap)
 library(dplyr)
 library(tidyr)
-library(genomation)
-library(GenomicFeatures)
-library(VariantAnnotation)
+library(reshape)
+library(org.Hs.eg.db)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
 library(ggplot2)
-library(biomaRt)
 library(VennDiagram)
-library(DiffBind)
-library(pheatmap)
 
 rm(list = ls())
 setwd("~/Dropbox/GitHub/ATAC/")
-ensembl <- useMart("ensembl",dataset = "hsapiens_gene_ensembl")
 source("../../X/function.R")
 
-# atac peaks and similarity
+# Summary of ATAC peaks
 (files = list.files("broadPeak/")) # atac broadPeak (all samples) 
 peaks = lapply(files, function(x) readBroadPeak(paste0("broadPeak/", x))) %>% GRangesList
 (names(peaks) <- c(paste0("Ast", 1:3), paste0("Neu", 1:6)))
+(peaks.All <- reduce(unlist(peaks), ignore.strand = T))
 
-(peaks.union <- reduce(unlist(peaks), ignore.strand = T))
-peaks.bi <- sapply(peaks, function(x) countOverlaps(peaks.union, x)) & 1 
-(unique <- table(rowSums(peaks.bi))) # unique peak number: 64%
-(unqiue1 <- colSums(peaks.bi & rowSums(peaks.bi) == 1)) # unique peak number each sample
-sapply(peaks, length) # peak number each sample, filter required?
-sapply(peaks, length) - unqiue1 
-peaks.bi.select <- peaks.bi[rowSums(peaks.bi) > 1, ] + 0
-pheatmap(cor(peaks.bi.select))
+peaks.bi <- sapply(peaks, function(x) countOverlaps(peaks.All, x)) & 1 
+table(rowSums(peaks.bi)) # unique peak number: 64%
+(number.1 <- colSums(peaks.bi & rowSums(peaks.bi) == 1)) # unique peak number each sample
+(number.All <- sapply(peaks, length)) # peak number each sample
 
-# atac peaks by gene structures (all samples)
-gene.parts <- readTranscriptFeatures("bed/hg19_refseq_ucsc.bed") 
-annot.list <- annotateWithGeneParts(peaks, gene.parts) 
-scoreMatrix <- ScoreMatrix(target = peaks[[1]], windows = gene.parts$promoters)
-
-(peaks.gene.parts <- sapply(annot.list, function(x) x@annotation) %>% as.data.frame)
-(gene.parts.peaks <- sapply(annot.list, function(x) x@perc.of.OlapFeat) %>% as.data.frame)
-
-temp = peaks.gene.parts 
-temp = gene.parts.peaks
-graph.dt <- gather(temp, sample, value)
-graph.dt$feature <- rep(rownames(temp), 9)
-graph.dt$sample <- gsub("-.*-", "", graph.dt$sample) 
-
-pdf("pdf/gene_part1.pdf", width = 9, height = 5)
-pdf("pdf/gene_part2.pdf", width = 9, height = 5)
-ggplot(graph.dt, aes(x = sample, y = value, fill = feature)) + 
+gdt = data.frame(sample = names(peaks), unique = number.1, shared = number.All - number.1)
+gdt = gather(gdt, type, value, one_of(c("unique", "shared")))
+pdf("pdf/peaks.pdf", width = 6, height = 2.5)
+ggplot(gdt, aes(x = sample, y = value, fill = type)) + 
   geom_bar(stat = "identity", position = "dodge") +
-  theme_bw() + xlab("") + ylab("Percentage") + 
-# scale_fill_manual(values = c("grey70", "grey10", "dodgerblue3", "firebrick1")) +
-  scale_fill_manual(values = c("grey70", "dodgerblue3", "firebrick1")) +
+  theme_bw() + xlab("") + ylab("Number") + 
+  scale_fill_manual(values = c("grey70", "firebrick1")) +
   theme(legend.key = element_blank()) 
 dev.off()
 
-pdf("pdf/score_matrix.pdf", width = 10, height = 6)
-my_palette = colorRampPalette(c("blue", "yellow", "red"))(n = 3e2)
-heatMatrix(scoreMatrix, col = my_palette)
+peaks.All.select <- peaks.All[rowSums(peaks.bi) > 1, ]
+hist(width(peaks.All.select), n = 1e3, col = "red", border = "red")
+
+peaks.bi.select <- peaks.bi[rowSums(peaks.bi) > 1, ] + 0
+hc1 <- hcluster(t(peaks.bi.select), method = "pearson", link = "average") %>% as.phylo
+mycol = c(rep("blue", 3), rep("red", 6))
+pdf("pdf/Hc.pdf", width = 5, height = 3)
+plot(hc1, label.offset=1e-2, tip.color = mycol, direction="downward")
 dev.off()
 
-promoters <- gene.parts$TSSes
-start(promoters) <- start(promoters) - 1e3
-end(promoters) <- end(promoters) + 1e3
-atac_promoters_gr <- lapply(peaks, function(x) subsetByOverlaps(promoters, x))
-atac_promoters_genes <- lapply(atac_promoters_gr, function(x) {
-  symbol = getBM("external_gene_name", "refseq_mrna", unique(x$name), ensembl)
-  symbol$external_gene_name %>% unique
-})
+peaks.bi.select.Ast = rowSums(peaks.bi.select[, 1:3]) & 1
+peaks.bi.select.Neu = rowSums(peaks.bi.select[, 4:9]) & 1
+vennList = list(Ast = which(peaks.bi.select.Ast), Neu = which(peaks.bi.select.Neu))
+venn.diagram(vennList, imagetype = "png", file = "pdf/venn1.png", width = 500, height = 500, resolution = 200)
 
-atac_promoters_genes_astrocyte <- unlist(atac_promoters_genes[1:3])
-atac_promoters_genes_astrocyte <- names(which(table(atac_promoters_genes_astrocyte) == 3)) 
-atac_promoters_genes_neuron <- unlist(atac_promoters_genes[4:9])
-atac_promoters_genes_neuron <- names(which(table(atac_promoters_genes_neuron) == 6)) 
+# Genetic 
+txdb = keepStandardChromosomes(TxDb.Hsapiens.UCSC.hg19.knownGene)
+txdb.gr = GenomicRangesList(cds = cds(txdb), exons = exons(txdb), genes = genes(txdb), promoters = promoters(txdb))
+txdb.gr$introns = unlist(intronsByTranscript(txdb))
+txdb.gr$five = unlist(fiveUTRsByTranscript(txdb))
+txdb.gr$three = unlist(threeUTRsByTranscript(txdb))
+txdb.gr = lapply(txdb.gr, function(x) {strand(x) = "*"; reduce(x)})
+txdb.gr$intergenic = gaps((txdb.gr$genes + 3e3))
+txdb.gr$intergenic = txdb.gr$intergenic[strand(txdb.gr$intergenic) == "*", ]
 
-vennList <- list(Neuron = atac_promoters_genes_neuron, Astrocyte = atac_promoters_genes_astrocyte)
-venn.diagram(vennList, imagetype = "png", file = "pdf/venn.png", width = 1500, height = 1500)
+overlap.bs = sapply(peaks, function(x) sapply(txdb.gr, function(y) sum(width(intersect(x, y)))))
+overlap.ct.pk = sapply(peaks, function(x) sapply(txdb.gr, function(y) sum(countOverlaps(x, y) & 1))) # of peak
+overlap.ct.gs = sapply(peaks, function(x) sapply(txdb.gr, function(y) sum(countOverlaps(y, x) & 1))) # of feature
 
-atac_promoters_genes_neuron_gk <- hsGK(atac_promoters_genes_neuron)
-atac_promoters_genes_astrocyte_gk <- hsGK(atac_promoters_genes_astrocyte)
+(bs2pk = sweep(overlap.bs, 2, sapply(peaks, function(x) sum(width(x))), "/")) # to peak in bp
+(bs2gs = sweep(overlap.bs, 1, sapply(txdb.gr, function(x) sum(width(x))), "/")) # to gene structure in bp
+(ct2pk = sweep(overlap.ct.pk, 2, sapply(peaks, length), "/")) # to peak in count
+(ct2gs = sweep(overlap.ct.gs, 1, sapply(txdb.gr, length), "/")) # to gene structure in count
+
+col = rep("grey30", 8); col[c(3, 7)] = "firebrick1"
+overlap_pctg = list(bs2pk = bs2pk, bs2gs = bs2gs, ct2pk = ct2pk, ct2gs = ct2gs)
+pdf("pdf/overlap_pctg.pdf", width = 7, height = 4)
+lapply(names(overlap_pctg), function(x) { 
+  ggplot(melt(overlap_pctg[[x]]), aes(x = X1, y = value, fill = X1)) + geom_boxplot() + 
+    scale_fill_manual(values = col) + xlab(x) + theme_bw() + theme(legend.position = "none")
+}); dev.off()
+
+openAll = sapply(peaks, function(x) sum(width(x))) / sum(as.numeric(seqlengths(txdb)))
+odds_feature = sweep(bs2gs, 2, openAll, "/")
+pdf("pdf/odds.pdf", width = 7, height = 4)
+ggplot(melt(odds_feature), aes(x = X1, y = value, fill = X1)) + geom_boxplot() +
+  scale_fill_manual(values = col) + theme_bw() + theme(legend.position = "none")
+dev.off()
+
+# Genes
+genes = genes(txdb)
+genes.tts = resize(genes, 1)
+promoters = promoters(genes.tts, 2000, 200) # upstream:2000; downstream:200
+promoters$symbol = select(org.Hs.eg.db, promoters$gene_id, columns=c("SYMBOL"), keytype="ENTREZID")$SYMBOL
+open_promoters <- GRangesList(lapply(peaks, function(x) subsetByOverlaps(promoters, x)))
+genesAst = names(which(table(unlist(open_promoters[1:3])$symbol) == 3))
+genesNeu = names(which(table(unlist(open_promoters[4:9])$symbol) == 6))
+
+vennList <- list(Neuron = genesNeu, Astrocyte = genesAst)
+venn.diagram(vennList, imagetype = "png", file = "pdf/venn2.png", width = 500, height = 500, resolution = 200)
+
+genesAst_gk <- hsGK(setdiff(genesAst, genesNeu)); gk = genesAst_gk
+genesNeu_gk <- hsGK(setdiff(genesNeu, genesAst)); gk = genesNeu_gk
 data.frame(KEGG = gk$KEGG$Term[1:20], BP = gk$GO$BP$Term[1:20], MF = gk$GO$BP$Term[1:20])
 
-# atac peaks: neuron/Astroctytes-specific
-neuron_file <- "Astrocytes_vs_neurons.HOMER_sorted_final_header_negative.txt"
-astrocyte_file <- "Astrocytes_vs_neurons.HOMER_sorted_final_header_positive.txt"
-neuron <- read.delim(paste0("diff/", neuron_file), stringsAsFactors = F)
-astrocyte <- read.delim(paste0("diff/", astrocyte_file), stringsAsFactors = F)
-neuron <- dplyr::select(neuron, -one_of("chr", "start", "end", "strand", "width"))
-neuron <- makeGRangesFromDataFrame(neuron, keep.extra.columns = T)
-astrocyte <- dplyr::select(astrocyte, -one_of("chr", "start", "end", "strand", "width"))
-astrocyte <- makeGRangesFromDataFrame(astrocyte, keep.extra.columns = T)
-peaks_diff <- GRangesList(neuron = neuron_gr, astrocyte = astrocyte_gr)
+# Cell-specific open chromatin 
+Neu_file <- "diff/Astrocytes_vs_neurons.HOMER_sorted_final_header_negative.txt"
+Ast_file <- "diff/Astrocytes_vs_neurons.HOMER_sorted_final_header_positive.txt"
+peaks_diff = lapply(c(Neu_file, Ast_file), function(file) {
+  x1 = read.delim(file, stringsAsFactors = F)
+  dplyr::select(x1, -one_of("chr", "start", "end", "strand", "width")) %>% makeGRangesFromDataFrame
+}) %>% GRangesList
+names(peaks_diff) = c("Neu", "Ast")
 
-# with genes promoters
-atac_diff_promoters_gr <- lapply(peaks_diff, function(x) subsetByOverlaps(promoters, x))
-atac_diff_promoters_genes <- lapply(atac_diff_promoters_gr, function(x) {
-  symbol = getBM("external_gene_name", "refseq_mrna", unique(x$name), ensembl)
-  symbol$external_gene_name %>% unique
-})
+open_promoters_diff <- GRangesList(lapply(peaks_diff, function(x) subsetByOverlaps(promoters, x)))
+open_promoters_diff_genes = lapply(open_promoters_diff, function(x) {y = x$symbol; y[! is.na(y)]})
+venn.diagram(open_promoters_diff_genes, imagetype="png", file="pdf/venn3.png", width=500, height=500, resolution=200)
+myGK <- lapply(open_promoters_diff_genes, hsGK)
+lapply(myGK, function(x) {data.frame(KEGG=x$KEGG$Term[1:20], BP=x$GO$BP$Term[1:20], MF=x$GO$BP$Term[1:20])})
 
-venn.diagram(atac_diff_promoters_genes, imagetype = "png", file = "pdf/venn2.png", width = 1500, height = 1500)
-atac_diff_promoters_genes_gk <- lapply(atac_diff_promoters_genes, hsGK)
-lapply(atac_diff_promoters_genes_gk, function(gk) {
-  data.frame(KEGG = gk$KEGG$Term[1:20], BP = gk$GO$BP$Term[1:20], MF = gk$GO$BP$Term[1:20])
-})
+# GWAS
+load("../Adsp/data/glmList.rdt")
+select <- filter(glmList$gwas, LOD > 15) # permutation cut
+select_gr <- makeGRangesFromDataFrame(select, start.field = "POS", end.field = "POS", keep.extra.columns = T)
+select_gr <- renameSeqlevels(select_gr, paste0("chr", seqlevels(select_gr)))
+open_select <- GRangesList(lapply(peaks, function(idx) subsetByOverlaps(select_gr, idx)))
 
-load("../Adsp/data/glmList.rdt") # GWAS
-for(obj in names(glmList)) assign(obj, glmList[[obj]])
-select <- filter(gwas, LOD > 15) # permutation cut
-gwas_gr <- merge(vep, select, by.x = "UID", by.y = "UID")
-gwas_gr <- makeGRangesFromDataFrame(gwas_gr, start.field = "POS", end.field = "POS", keep.extra.columns = T)
-gwas_gr <- renameSeqlevels(gwas_gr, paste0("chr", seqlevels(gwas_gr)))
+(openVar_Ast = names(which(table(unlist(open_select[1:3])$UID) == 3)))
+(openVar_Neu = names(which(table(unlist(open_select[4:9])$UID) == 6)))
+openVar_Ast_gwas = merge(glmList$vep, select[select$UID %in% openVar_Ast, ], by.x = "UID", by.y = "UID")
+openVar_Neu_gwas = merge(glmList$vep, select[select$UID %in% openVar_Neu, ], by.x = "UID", by.y = "UID")
 
-# atac by ADSP variants
-(atac_gwas_gr <- lapply(peaks, function(idx) subsetByOverlaps(gwas_gr, idx)))
-(gene_neurons <- lapply(atac_gwas_gr[grep("Neu", names(atac_gwas_gr))], function(x) unique(x$Symbol)))
-(gene_neurons <- names(which(table(unlist(gene_neurons)) == 6)))
-(gene_astrocytes <- lapply(atac_gwas_gr[grep("Ast", names(atac_gwas_gr))], function(x) unique(x$Symbol)))
-(gene_astrocytes <- names(which(table(unlist(gene_astrocytes)) == 3)))
-intersect(gene_astrocytes, gene_neurons)
-
-# atac_diff by ADSP variants
-atac_diff_gwas_gr <- lapply(peaks_diff, function(idx) subsetByOverlaps(gwas_gr, idx))
-lapply(atac_diff_gwas_gr, function(x) mcols(x)[c("Feature", "Consequence", "Symbol")])
-sapply(atac_gwas_gr, length)
+openVar_diff = lapply(peaks_diff, function(idx) subsetByOverlaps(select_gr, idx))
+openVar_diff_gwas = lapply(openVar_diff, function(x) merge(glmList$vep, select[select$UID %in% x$UID, ], by.x = "UID", by.y = "UID"))
+lapply(openVar_diff_gwas, function(x) unique(x$Symbol))
