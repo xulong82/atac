@@ -3,13 +3,13 @@ library(amap)
 library(dplyr)
 library(tidyr)
 library(reshape)
-library(org.Hs.eg.db)
+library(genomation)
 library(TxDb.Hsapiens.UCSC.hg19.knownGene)
 library(ggplot2)
 library(VennDiagram)
 
 rm(list = ls())
-setwd("~/Dropbox/GitHub/ATAC/")
+setwd("~/Dropbox/GitHub/CHIP/")
 source("../../X/function.R")
 
 # Summary of ATAC peaks
@@ -20,7 +20,7 @@ peaks = lapply(files, function(x) readBroadPeak(paste0("broadPeak/", x))) %>% GR
 
 peaks.bi <- sapply(peaks, function(x) countOverlaps(peaks.All, x)) & 1 
 table(rowSums(peaks.bi)) # unique peak number: 64%
-(number.1 <- colSums(peaks.bi & rowSums(peaks.bi) == 1)) # unique peak number each sample
+(number.1 <- colSums(peaks.bi & rowSums(peaks.bi) == 1)) # unique peak each sample
 (number.All <- sapply(peaks, length)) # peak number each sample
 
 gdt = data.frame(sample = names(peaks), unique = number.1, shared = number.All - number.1)
@@ -47,6 +47,10 @@ peaks.bi.select.Ast = rowSums(peaks.bi.select[, 1:3]) & 1
 peaks.bi.select.Neu = rowSums(peaks.bi.select[, 4:9]) & 1
 vennList = list(Ast = which(peaks.bi.select.Ast), Neu = which(peaks.bi.select.Neu))
 venn.diagram(vennList, imagetype = "png", file = "pdf/venn1.png", width = 500, height = 500, resolution = 200)
+
+peaks.Ast.select <- peaks.All.select[peaks.bi.select.Ast & (! peaks.bi.select.Neu), ]
+peaks.Neu.select <- peaks.All.select[(! peaks.bi.select.Ast) & peaks.bi.select.Neu, ]
+peaks.specific <- GRangesList(Ast = peaks.Ast.select, Neu = peaks.Neu.select)
 
 # Genetic 
 txdb = keepStandardChromosomes(TxDb.Hsapiens.UCSC.hg19.knownGene)
@@ -88,11 +92,37 @@ genes.tts = resize(genes, 1)
 promoters = promoters(genes.tts, 2000, 200) # upstream:2000; downstream:200
 promoters$symbol = select(org.Hs.eg.db, promoters$gene_id, columns=c("SYMBOL"), keytype="ENTREZID")$SYMBOL
 open_promoters <- GRangesList(lapply(peaks, function(x) subsetByOverlaps(promoters, x)))
+
 genesAst = names(which(table(unlist(open_promoters[1:3])$symbol) == 3))
 genesNeu = names(which(table(unlist(open_promoters[4:9])$symbol) == 6))
 
+genesAst = unique(unlist(open_promoters[1:3])$symbol)
+genesNeu = unique(unlist(open_promoters[4:9])$symbol)
+
+genesAst = genesAst[! is.na(genesAst)]
+genesNeu = genesNeu[! is.na(genesNeu)]
+
+length(genesAst) / length(which(peaks.bi.select.Ast))
+length(genesNeu) / length(which(peaks.bi.select.Neu))
+
 vennList <- list(Neuron = genesNeu, Astrocyte = genesAst)
-venn.diagram(vennList, imagetype = "png", file = "pdf/venn2.png", width = 500, height = 500, resolution = 200)
+venn.diagram(vennList, imagetype = "png", file = "pdf/venn5.png", width = 500, height = 500, resolution = 200)
+
+open_promoters_specific <- GRangesList(lapply(peaks.specific, function(x) subsetByOverlaps(promoters, x)))
+open_promoters_specific_genes = lapply(open_promoters_specific, function(x) {y = x$symbol; y[! is.na(y)]})
+venn.diagram(open_promoters_specific_genes, imagetype="png", file="pdf/venn4.png", width=500, height=500, resolution=200)
+
+sapply(peaks.specific, length) 
+sapply(open_promoters_specific_genes, length)
+sapply(open_promoters_specific_genes, length) / sapply(peaks.specific, length) # Ast peaks derive from promoters
+
+overlap.bs.2 = sapply(peaks.specific, function(x) sapply(txdb.gr, function(y) sum(width(intersect(x, y)))))
+(bs2pk.2 = sweep(overlap.bs.2, 2, sapply(peaks.specific, function(x) sum(width(x))), "/")) # to peak in bp
+(bs2gs.2 = sweep(overlap.bs.2, 1, sapply(txdb.gr, function(x) sum(width(x))), "/")) # to gene structure in bp
+sweep(bs2gs.2, 2, colSums(bs2gs.2), "/")
+
+ggplot(melt(bs2pk.2), aes(x = X1, y = value, fill = X2)) + 
+  geom_bar(stat = "identity", position = "dodge") + scale_fill_manual(values = c("blue", "red")) + theme_bw() 
 
 genesAst_gk <- hsGK(setdiff(genesAst, genesNeu)); gk = genesAst_gk
 genesNeu_gk <- hsGK(setdiff(genesNeu, genesAst)); gk = genesNeu_gk
